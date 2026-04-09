@@ -53,14 +53,26 @@ npm install
 
 ### 1. Token (do not commit)
 
-Copy the example env file and set your token:
+The server reads **`.env`** in this order (standard `dotenv` rules: an already-set variable is not overwritten by a later file):
+
+1. **`<current working directory>/.env`** — whatever directory the MCP process was started with as `cwd`.  
+   - In Cursor, if you set `"cwd": "${workspaceFolder}"`, this is the **root of the open project**. Put **`PLANE_TOKEN`** there if the token should be **per repository**.
+2. **`<plane-io-mcp clone>/.env`** — next to this package’s `package.json` (parent of `src/`).  
+   - Use this for a **single shared token** on the machine, or when you run `node src/index.mjs` from inside the clone.
+
+You can keep **only one** of these files, or both (workspace `.env` wins for keys present in both).
+
+Example next to the clone:
 
 ```bash
+cd /path/to/plane-io-mcp
 cp .env.example .env
 # edit .env — set PLANE_TOKEN=...
 ```
 
-Alternatively use `~/.config/plane-sync/credentials.json` or global `config.json` (see below).
+Example for a **per-project** token: create `.env` in the **app repo root** (and add `.env` to that repo’s `.gitignore`).
+
+You do **not** have to use `.env` at all if the token is already in the environment (e.g. `env` / `envFile` in the MCP client config) or in **`~/.config/plane-sync/credentials.json`** / global `config.json` (see below).
 
 ### 2. Global defaults (optional)
 
