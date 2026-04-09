@@ -47,6 +47,23 @@ cd plane-io-mcp
 npm install
 ```
 
+### Guided install for Cursor (interactive)
+
+The repository includes **`install-cursor-mcp.sh`** (Russian prompts). It will:
+
+- Ask for your **Git project root**, **Plane API token**, **API base URL**, **workspace slug**, **project id** (or **project slug** if id is empty), and **backlog file path** (default `docs/todo/backlog.md`).
+- Write **`~/.config/plane-mcp.env`** (`PLANE_TOKEN`, mode `600`) and merge **`~/.config/plane-sync/config.json`** (`baseUrl` / `apiBaseUrl`, no token).
+- Create or update **`.plane-sync.json`** in the project, create the backlog file with default **Inbox / Ready / Doing / Done** headings if missing, and append **`.plane-sync.state.json`** and **`.env`** to the project **`.gitignore`**.
+- Merge the **`plane-sync`** entry into **`~/.cursor/mcp.json`** using the **absolute path to this clone** (`src/index.mjs`), **`cwd`: `${workspaceFolder}`**, and **`envFile`** pointing at `~/.config/plane-mcp.env`.
+- Optionally run **`npm install`** in the clone.
+
+```bash
+chmod +x install-cursor-mcp.sh
+./install-cursor-mcp.sh
+```
+
+After it finishes, **restart Cursor** (or toggle MCP) and run **`plane_probe`** from a chat with the target workspace open.
+
 ---
 
 ## Configuration
