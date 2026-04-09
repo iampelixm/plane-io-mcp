@@ -1,0 +1,23 @@
+{
+  "workspaceSlug": "your-workspace",
+  "projectId": "your-project-id",
+  "backlogFiles": [
+    "docs/todo/backlog.md",
+    "docs/todo/**/*.md"
+  ],
+  "detailsFile": "docs/todo/task-details.md",
+  "sections": {
+    "inbox": "Inbox",
+    "ready": "Ready",
+    "doing": "Doing",
+    "done": "Done"
+  },
+  "mapping": {
+    "sectionToStateId": {
+      "Inbox": "plane-state-id-1",
+      "Ready": "plane-state-id-2",
+      "Doing": "plane-state-id-3",
+      "Done": "plane-state-id-4"
+    }
+  }
+}
