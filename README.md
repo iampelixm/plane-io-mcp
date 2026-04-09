@@ -64,6 +64,8 @@ chmod +x install-cursor-mcp.sh
 
 After it finishes, **restart Cursor** (or toggle MCP) and run **`plane_probe`** from a chat with the target workspace open.
 
+**NVM-only machines:** if `node` is not on `PATH` yet, the script tries to `source` `$NVM_DIR/nvm.sh` (default `~/.nvm/nvm.sh`), then falls back to the newest directory under `~/.nvm/versions/node/*/bin/node`. The generated **`mcp.json` always stores the absolute path to `node`**, because Cursor’s MCP process usually does **not** load NVM.
+
 ---
 
 ## Configuration

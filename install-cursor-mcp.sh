@@ -13,6 +13,39 @@ SERVER_NAME="plane-sync"
 
 die() { echo "Ошибка: $*" >&2; exit 1; }
 
+# NVM: без `source nvm.sh` команда `node` часто отсутствует в PATH (скрипт, cron, другой терминал).
+load_nvm_if_present() {
+  local d="${NVM_DIR:-$HOME/.nvm}"
+  [[ -s "$d/nvm.sh" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$d/nvm.sh"
+  return 0
+}
+
+resolve_node_bin() {
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return 0
+  fi
+  if load_nvm_if_present && command -v node >/dev/null 2>&1; then
+    echo "Подключён NVM ($NVM_DIR/nvm.sh), node: $(command -v node)" >&2
+    command -v node
+    return 0
+  fi
+  # Последний resort: явный путь под каталогом версий NVM (без загрузки nvm.sh)
+  local root="${NVM_DIR:-$HOME/.nvm}/versions/node"
+  if [[ -d "$root" ]]; then
+    local best=""
+    best="$(find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort -V | tail -n 1)"
+    if [[ -n "$best" && -x "$best/bin/node" ]]; then
+      echo "NVM: node не в PATH; используется $best/bin/node (обновите default: nvm alias default …)" >&2
+      echo "$best/bin/node"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 echo "=== Установка plane-io-mcp для Cursor ==="
 echo "Каталог сервера: $MCP_ROOT"
 echo
@@ -21,14 +54,19 @@ if [[ ! -f "$MCP_ENTRY" ]]; then
   die "не найден $MCP_ENTRY (запускайте скрипт из корня клона plane-io-mcp)."
 fi
 
-if ! command -v node >/dev/null 2>&1; then
-  die "в PATH нет node. Установите Node.js 18+."
+NODE_BIN=""
+if ! NODE_BIN="$(resolve_node_bin)"; then
+  die "не найден node. Установите Node.js 18+ или для NVM выполните в shell: source \"\${NVM_DIR:-\$HOME/.nvm}/nvm.sh\""
 fi
+[[ -x "$NODE_BIN" ]] || die "не исполняемый файл: $NODE_BIN"
 
-NODE_BIN="$(command -v node)"
-read -rp "Путь к node [${NODE_BIN}]: " NODE_ANS
+read -rp "Путь к node для Cursor [${NODE_BIN}]: " NODE_ANS
 NODE_BIN="${NODE_ANS:-$NODE_BIN}"
 [[ -x "$NODE_BIN" ]] || die "не исполняемый файл: $NODE_BIN"
+
+if [[ "$NODE_BIN" == *"/.nvm/"* ]] || [[ "$NODE_BIN" == *"/nvm/"* ]]; then
+  echo "Подсказка: в mcp.json записан полный путь к node — так Cursor работает без NVM в своём PATH." >&2
+fi
 
 read -rp "Корень вашего Git-проекта (где лежит .git) [$(pwd)]: " PROJ_ANS
 PROJECT_ROOT="${PROJ_ANS:-$PWD}"
