@@ -25,7 +25,7 @@ import {
 } from "./core.mjs";
 import fs from "node:fs/promises";
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import dotenv from "dotenv";
@@ -39,11 +39,13 @@ function toolError(message) {
 function loadEnv() {
   // Load from current working directory first (so users can run from repo),
   // then from the server package directory as a fallback.
-  dotenv.config({ path: path.join(process.cwd(), ".env") });
+  // quiet: required — dotenv v17+ logs to stdout by default and breaks MCP stdio JSON-RPC.
+  const opts = { quiet: true };
+  dotenv.config({ ...opts, path: path.join(process.cwd(), ".env") });
 
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
-  dotenv.config({ path: path.join(__dirname, "..", ".env") });
+  dotenv.config({ ...opts, path: path.join(__dirname, "..", ".env") });
 }
 
 async function getCtx(repoPath) {
@@ -343,69 +345,111 @@ async function cmdSyncLike({ repoPath, dryRun, mode }) {
   return { ok: true, summary: summarizePlan(actions, { cwd: ctx.repoRoot }), actions };
 }
 
-const server = new Server(
-  { name: "mcp-plane-sync", version: "0.1.0" },
-  { capabilities: { tools: {} } },
-);
+const mcpServer = new McpServer({ name: "mcp-plane-sync", version: "0.1.0" });
 
-server.tool(
+mcpServer.registerTool(
   "plane_probe",
-  { repoPath: z.string().optional() },
-  async ({ repoPath }) => ({ content: [{ type: "text", text: JSON.stringify(await cmdProbe({ repoPath }), null, 2) }] }),
+  {
+    description: "Verify Plane API token and repository config (users/me).",
+    inputSchema: { repoPath: z.string().optional() },
+  },
+  async ({ repoPath }) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdProbe({ repoPath }), null, 2) }],
+  }),
 );
 
-server.tool(
+mcpServer.registerTool(
   "plane_sync_status",
-  { repoPath: z.string().optional(), dryRun: z.boolean().optional() },
-  async ({ repoPath, dryRun }) => ({ content: [{ type: "text", text: JSON.stringify(await cmdSyncLike({ repoPath, dryRun: dryRun ?? true, mode: "status" }), null, 2) }] }),
+  {
+    description: "Dry-run: show planned markdown ↔ Plane sync without writing files.",
+    inputSchema: { repoPath: z.string().optional(), dryRun: z.boolean().optional() },
+  },
+  async ({ repoPath, dryRun }) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdSyncLike({ repoPath, dryRun: dryRun ?? true, mode: "status" }), null, 2) }],
+  }),
 );
 
-server.tool(
+mcpServer.registerTool(
   "plane_sync",
-  { repoPath: z.string().optional(), dryRun: z.boolean().optional() },
-  async ({ repoPath, dryRun }) => ({ content: [{ type: "text", text: JSON.stringify(await cmdSyncLike({ repoPath, dryRun: dryRun ?? false, mode: "sync" }), null, 2) }] }),
+  {
+    description: "Apply bidirectional sync between markdown backlog and Plane issues.",
+    inputSchema: { repoPath: z.string().optional(), dryRun: z.boolean().optional() },
+  },
+  async ({ repoPath, dryRun }) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdSyncLike({ repoPath, dryRun: dryRun ?? false, mode: "sync" }), null, 2) }],
+  }),
 );
 
-server.tool(
+mcpServer.registerTool(
   "plane_issue_new",
   {
-    repoPath: z.string().optional(),
-    title: z.string(),
-    description: z.string().optional(),
-    toSection: z.string().optional(),
-    dryRun: z.boolean().optional(),
+    description: "Create a Plane issue and append a task line to the markdown backlog.",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      title: z.string(),
+      description: z.string().optional(),
+      toSection: z.string().optional(),
+      dryRun: z.boolean().optional(),
+    },
   },
-  async (args) => ({ content: [{ type: "text", text: JSON.stringify(await cmdNew({ ...args, dryRun: args.dryRun ?? false }), null, 2) }] }),
+  async (args) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdNew({ ...args, dryRun: args.dryRun ?? false }), null, 2) }],
+  }),
 );
 
-server.tool(
+mcpServer.registerTool(
   "plane_issue_take",
   {
-    repoPath: z.string().optional(),
-    query: z.string(),
-    toSection: z.string().optional(),
-    comment: z.string().optional(),
-    dryRun: z.boolean().optional(),
+    description: "Move task to Doing (or section), assign self, optional comment.",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      query: z.string(),
+      toSection: z.string().optional(),
+      comment: z.string().optional(),
+      dryRun: z.boolean().optional(),
+    },
   },
-  async (args) => ({ content: [{ type: "text", text: JSON.stringify(await cmdTake({ ...args, dryRun: args.dryRun ?? false }), null, 2) }] }),
+  async (args) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdTake({ ...args, dryRun: args.dryRun ?? false }), null, 2) }],
+  }),
 );
 
-server.tool(
+mcpServer.registerTool(
   "plane_issue_set_status",
-  { repoPath: z.string().optional(), query: z.string(), toSection: z.string(), dryRun: z.boolean().optional() },
-  async (args) => ({ content: [{ type: "text", text: JSON.stringify(await cmdSetStatus({ ...args, dryRun: args.dryRun ?? false }), null, 2) }] }),
+  {
+    description: "Move task to a markdown section and update Plane state when mapped.",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      query: z.string(),
+      toSection: z.string(),
+      dryRun: z.boolean().optional(),
+    },
+  },
+  async (args) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdSetStatus({ ...args, dryRun: args.dryRun ?? false }), null, 2) }],
+  }),
 );
 
-server.tool(
+mcpServer.registerTool(
   "plane_issue_comment",
-  { repoPath: z.string().optional(), query: z.string(), text: z.string(), dryRun: z.boolean().optional() },
-  async (args) => ({ content: [{ type: "text", text: JSON.stringify(await cmdComment({ ...args, dryRun: args.dryRun ?? false }), null, 2) }] }),
+  {
+    description: "Add a comment on a Plane issue (and details file if configured).",
+    inputSchema: {
+      repoPath: z.string().optional(),
+      query: z.string(),
+      text: z.string(),
+      dryRun: z.boolean().optional(),
+    },
+  },
+  async (args) => ({
+    content: [{ type: "text", text: JSON.stringify(await cmdComment({ ...args, dryRun: args.dryRun ?? false }), null, 2) }],
+  }),
 );
 
 async function run() {
   loadEnv();
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await mcpServer.connect(transport);
 }
 
 run().catch((e) => {
