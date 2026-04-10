@@ -1,6 +1,6 @@
 {
   "workspaceSlug": "your-workspace",
-  "projectId": "your-project-id",
+  "projectId": "00000000-0000-4000-8000-000000000000",
   "backlogFiles": [
     "docs/todo/backlog.md",
     "docs/todo/**/*.md"

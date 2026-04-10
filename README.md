@@ -100,20 +100,17 @@ You do **not** have to use `.env` at all if the token is already in the environm
 ```json
 {
   "baseUrl": "https://your-plane.example.com",
-  "apiBaseUrl": "https://your-plane.example.com/api/v1/",
-  "auth": {
-    "header": "Authorization",
-    "scheme": "Bearer"
-  }
+  "apiBaseUrl": "https://your-plane.example.com/api/v1/"
 }
 ```
 
 Notes:
 
 - Plane’s REST API is typically under **`/api/v1/`**. Trailing slashes on URLs matter on some deployments.
-- API keys shaped like `plane_api_…` are sent as **`X-API-Key`** by default when no custom `auth` is set.
+- For tokens shaped like **`plane_api_…`**, Plane expects the **`X-API-Key`** header — **not** `Authorization: Bearer …`.
+- If this file defines an **`auth`** block that forces **Bearer** (or any scheme other than the key header), it **overrides** the automatic API-key behaviour. Requests then go out with the wrong header and the API often returns **401** (*Authentication credentials were not provided*). **Either** omit `auth` for `plane_api_…` keys, **or** document clearly that Bearer must not be forced for those keys.
 
-### 3. Repository config
+### 3. Repository config (`.plane-sync.json`)
 
 In the **root of the Git project** (not necessarily this package), add `.plane-sync.json`. Start from the example in this repo:
 
@@ -121,11 +118,19 @@ In the **root of the Git project** (not necessarily this package), add `.plane-s
 cp .plane-sync.example.json /path/to/your/repo/.plane-sync.json
 ```
 
-Edit `workspaceSlug`, `projectId` (or `projectSlug`), `backlogFiles`, and optional `mapping.sectionToStateId` so markdown headings map to Plane workflow **states**.
+Edit `workspaceSlug`, **`projectId`** (recommended) or **`projectSlug`**, `backlogFiles`, and optional `mapping.sectionToStateId` so markdown headings map to Plane workflow **states**.
+
+**`projectId` must be the project UUID** from Plane’s API (e.g. from the projects list). Issue URLs use `…/projects/{id}/issues/…` with that **UUID**. A short **human-readable identifier** (e.g. `GOVADMIN`) is **not** the same value — putting it in `projectId` leads to **404** on issue routes. You may set **`projectSlug`** instead of **`projectId`**; the server resolves it via **`listProjects`** (see *Integrator notes*).
+
+**Optional — Kanban / status sync:** if **`mapping.sectionToStateId`** is empty or wrong, markdown sections and Plane columns may diverge. For full Kanban ↔ Plane alignment, fill the map using **state ids** from your workspace’s workflow in Plane (API or UI), keyed by the **exact** section heading strings you use in markdown.
 
 ### State file
 
 The sync writes **`.plane-sync.state.json`** in the repo for conflict detection. Add it to **`.gitignore`** in your application repository.
+
+### Integrator notes (package / MCP consumers)
+
+- **`listProjects` response shape:** Plane often returns a **paginated object** (`results`, `total_count`, …), not a bare array. **`pickProjectId`** in `core.mjs` accepts both an array and **`{ results }`** so **`projectSlug`** resolution works. If you fork the client, normalize the same way before calling **`.find`** on the list.
 
 ---
 
@@ -178,6 +183,14 @@ The server parses headings as **sections** (Inbox / Ready / Doing / Done by defa
 ## Debugging
 
 Set `PLANE_SYNC_DEBUG=1` to log sanitized request metadata to stderr (see `core.mjs`).
+
+---
+
+## Issue summary (for tickets / handoff)
+
+- **401** with API key: global **`~/.config/plane-sync/config.json`** forces **Bearer** via **`auth`**, so **`X-API-Key`** is not used.
+- **404** on issues: **`projectId`** must be the **UUID**, not a short **identifier** (e.g. `GOVADMIN`).
+- **Crash** with **`projectSlug`** only (older builds): paginated **`listProjects`** + **`pickProjectId`** calling **`.find`** on the raw object — fixed in this repo by normalizing to **`results`** inside **`pickProjectId`**.
 
 ---
 

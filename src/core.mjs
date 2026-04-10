@@ -412,7 +412,8 @@ export function assertRepoConfig(repoCfg) {
 export function pickProjectId(projects, repoCfg) {
   if (repoCfg.projectId) return repoCfg.projectId;
   if (!repoCfg.projectSlug) return null;
-  const p = projects.find((x) => x.slug === repoCfg.projectSlug) ?? projects.find((x) => x.identifier === repoCfg.projectSlug);
+  const list = Array.isArray(projects) ? projects : (projects?.results ?? []);
+  const p = list.find((x) => x.slug === repoCfg.projectSlug) ?? list.find((x) => x.identifier === repoCfg.projectSlug);
   return p?.id ?? null;
 }
 
