@@ -6,19 +6,27 @@ import {
   PlaneClient,
   appendTaskLineToSection,
   assertRepoConfig,
+  defaultBacklogFileForNewTask,
   ensureDetailsEntry,
+  ensureSectionHeading,
   findRepoRoot,
   findTaskMatches,
+  getForcedSectionNameForFile,
   loadConfig,
   moveTaskLineBetweenSections,
+  moveTaskLineCrossFiles,
   normalizeSections,
+  normalizeSectionFilesRaw,
   parseMarkdownTasks,
+  parseMarkdownTasksWithOptionalSectionFile,
   pickProjectId,
   readState,
-  resolveBacklogFiles,
+  resolveEffectiveBacklogFiles,
+  resolveSectionFilesToAbsolute,
   sectionToPlaneStateId,
   sha256,
   summarizePlan,
+  targetFileForSection,
   upsertIssueIdMarker,
   writeState,
   applyTaskLineUpdate,
@@ -56,28 +64,75 @@ async function getCtx(repoPath) {
   const { merged, repo, globalPath, repoPath: rp } = await loadConfig(repoRoot);
   assertRepoConfig(repo);
   const client = new PlaneClient(merged);
-  const backlogFiles = await resolveBacklogFiles(repoRoot, repo.backlogFiles);
-  if (!backlogFiles.length) throw toolError("No backlog files matched backlogFiles patterns.");
+  const backlogFiles = await resolveEffectiveBacklogFiles(repoRoot, repo);
+  if (!backlogFiles.length) throw toolError("No backlog files matched backlogFiles / sectionFiles.");
 
   const projects = await client.listProjects(repo.workspaceSlug);
   const projectId = pickProjectId(projects, repo);
   if (!projectId) throw toolError("Could not resolve projectId (check projectId or projectSlug in .plane-sync.json).");
 
   const sections = normalizeSections(repo);
+  const { keyToAbs: sectionFileMap } = resolveSectionFilesToAbsolute(repoRoot, normalizeSectionFilesRaw(repo));
   const state = await readState(repoRoot);
-  return { repoRoot, repo, merged, globalPath, repoConfigPath: rp, client, backlogFiles, projectId, sections, state };
+  return {
+    repoRoot,
+    repo,
+    merged,
+    globalPath,
+    repoConfigPath: rp,
+    client,
+    backlogFiles,
+    projectId,
+    sections,
+    sectionFileMap,
+    state,
+  };
 }
 
-async function parseAllBacklogs(backlogFiles) {
+async function parseAllBacklogs(ctx) {
   const parsedByFile = new Map();
   const allTasks = [];
-  for (const fp of backlogFiles) {
+  for (const fp of ctx.backlogFiles) {
+    const forced = getForcedSectionNameForFile(fp, ctx.sections, ctx.sectionFileMap);
     const md = await fs.readFile(fp, "utf8");
-    const parsed = parseMarkdownTasks(md, fp);
+    const parsed = parseMarkdownTasksWithOptionalSectionFile(md, fp, forced);
     parsedByFile.set(fp, parsed);
     allTasks.push(...parsed.tasks);
   }
   return { parsedByFile, allTasks };
+}
+
+async function applyTaskSectionChange(ctx, parsedByFile, t, toSection, dryRun, actions) {
+  const fromPath = t.filePath;
+  const targetPath = targetFileForSection(ctx.sections, ctx.sectionFileMap, toSection) ?? fromPath;
+  const cur = t.headings[t.headings.length - 1];
+  if (cur === toSection) return;
+
+  const fromParsed = parsedByFile.get(fromPath);
+  if (!fromParsed) throw toolError(`Internal: missing parsed backlog file for ${fromPath}`);
+
+  if (targetPath === fromPath) {
+    const lines = fromParsed.lines.slice();
+    moveTaskLineBetweenSections(lines, t.lineIndex, toSection);
+    actions.push({ type: "md:move", filePath: fromPath, title: t.title, toSection });
+    if (!dryRun) {
+      await fs.writeFile(fromPath, lines.join("\n"), "utf8");
+      fromParsed.lines = lines;
+    }
+  } else {
+    const toParsed = parsedByFile.get(targetPath);
+    if (!toParsed) throw toolError(`Internal: missing parsed backlog file for ${targetPath}`);
+    const fromLines = fromParsed.lines.slice();
+    const toLines = toParsed.lines.slice();
+    moveTaskLineCrossFiles(fromLines, t.lineIndex, toLines, toSection);
+    actions.push({ type: "md:move", filePath: fromPath, toFilePath: targetPath, title: t.title, toSection });
+    if (!dryRun) {
+      await fs.writeFile(fromPath, fromLines.join("\n"), "utf8");
+      await fs.writeFile(targetPath, toLines.join("\n"), "utf8");
+      fromParsed.lines = fromLines;
+      toParsed.lines = toLines;
+    }
+  }
 }
 
 async function cmdNew({ repoPath, title, description, toSection, dryRun }) {
@@ -98,11 +153,15 @@ async function cmdNew({ repoPath, title, description, toSection, dryRun }) {
   }
 
   const targetSection = toSection ?? ctx.sections.inbox;
-  const fp = ctx.backlogFiles[0];
+  const fp =
+    defaultBacklogFileForNewTask(ctx.backlogFiles, ctx.sectionFileMap, ctx.sections, targetSection) ??
+    ctx.backlogFiles[0];
   const md = await fs.readFile(fp, "utf8");
   const parsed = parseMarkdownTasks(md, fp);
   const lines = parsed.lines.slice();
   const taskLine = upsertIssueIdMarker(`- [ ] ${title}`, createdId);
+  const forced = getForcedSectionNameForFile(fp, ctx.sections, ctx.sectionFileMap);
+  if (forced) ensureSectionHeading(lines, targetSection);
   appendTaskLineToSection(lines, targetSection, taskLine);
   actions.push({ type: "md:append", filePath: fp, title, toSection: targetSection });
   if (!dryRun) await fs.writeFile(fp, lines.join("\n"), "utf8");
@@ -122,20 +181,14 @@ async function cmdNew({ repoPath, title, description, toSection, dryRun }) {
 
 async function cmdSetStatus({ repoPath, query, toSection, dryRun }) {
   const ctx = await getCtx(repoPath);
-  const { parsedByFile, allTasks } = await parseAllBacklogs(ctx.backlogFiles);
+  const { parsedByFile, allTasks } = await parseAllBacklogs(ctx);
   const matches = findTaskMatches(allTasks, query);
   if (matches.length !== 1) throw toolError(`Expected 1 match, got ${matches.length}`);
   const t = matches[0];
   if (!t.issueId) throw toolError("Matched task has no plane issueId yet (run sync first).");
 
   const actions = [];
-  const parsed = parsedByFile.get(t.filePath);
-  const lines = parsed.lines.slice();
-  if (t.headings[t.headings.length - 1] !== toSection) {
-    moveTaskLineBetweenSections(lines, t.lineIndex, toSection);
-    actions.push({ type: "md:move", filePath: t.filePath, title: t.title, toSection });
-    if (!dryRun) await fs.writeFile(t.filePath, lines.join("\n"), "utf8");
-  }
+  await applyTaskSectionChange(ctx, parsedByFile, t, toSection, dryRun, actions);
 
   const stateId = sectionToPlaneStateId(ctx.repo, toSection);
   if (stateId) {
@@ -148,7 +201,7 @@ async function cmdSetStatus({ repoPath, query, toSection, dryRun }) {
 
 async function cmdComment({ repoPath, query, text, dryRun }) {
   const ctx = await getCtx(repoPath);
-  const { allTasks } = await parseAllBacklogs(ctx.backlogFiles);
+  const { allTasks } = await parseAllBacklogs(ctx);
   const matches = findTaskMatches(allTasks, query);
   if (matches.length !== 1) throw toolError(`Expected 1 match, got ${matches.length}`);
   const t = matches[0];
@@ -181,7 +234,7 @@ async function cmdComment({ repoPath, query, text, dryRun }) {
 
 async function cmdTake({ repoPath, query, toSection, comment, dryRun }) {
   const ctx = await getCtx(repoPath);
-  const { parsedByFile, allTasks } = await parseAllBacklogs(ctx.backlogFiles);
+  const { parsedByFile, allTasks } = await parseAllBacklogs(ctx);
   const matches = findTaskMatches(allTasks, query);
   if (matches.length !== 1) throw toolError(`Expected 1 match, got ${matches.length}`);
   const t = matches[0];
@@ -189,13 +242,7 @@ async function cmdTake({ repoPath, query, toSection, comment, dryRun }) {
 
   const actions = [];
   const targetSection = toSection ?? ctx.sections.doing;
-  const parsed = parsedByFile.get(t.filePath);
-  const lines = parsed.lines.slice();
-  if (t.headings[t.headings.length - 1] !== targetSection) {
-    moveTaskLineBetweenSections(lines, t.lineIndex, targetSection);
-    actions.push({ type: "md:move", filePath: t.filePath, title: t.title, toSection: targetSection });
-    if (!dryRun) await fs.writeFile(t.filePath, lines.join("\n"), "utf8");
-  }
+  await applyTaskSectionChange(ctx, parsedByFile, t, targetSection, dryRun, actions);
 
   const me = await ctx.client.me();
   const myId = me?.id ? String(me.id) : null;
@@ -255,7 +302,8 @@ async function cmdSyncLike({ repoPath, dryRun, mode }) {
 
   for (const filePath of ctx.backlogFiles) {
     const md = await fs.readFile(filePath, "utf8");
-    const parsed = parseMarkdownTasks(md, filePath);
+    const forced = getForcedSectionNameForFile(filePath, ctx.sections, ctx.sectionFileMap);
+    const parsed = parseMarkdownTasksWithOptionalSectionFile(md, filePath, forced);
 
     for (const task of parsed.tasks) {
       if (task.issueId) {

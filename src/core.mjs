@@ -145,6 +145,7 @@ export async function loadConfig(repoRoot) {
         mapping: repoCfgRaw.mapping ?? {},
         detailsFile: repoCfgRaw.detailsFile ?? null,
         sections: repoCfgRaw.sections ?? null,
+        sectionFiles: repoCfgRaw.sectionFiles ?? null,
       }
     : null;
 
@@ -206,6 +207,53 @@ export async function resolveBacklogFiles(repoRoot, patterns) {
   return Array.from(new Set(res)).sort();
 }
 
+/** Keys in `.plane-sync.json` → `sectionFiles` and `sections`. */
+export const SECTION_KEYS = ["inbox", "ready", "doing", "done"];
+
+export function normalizeSectionFilesRaw(repo) {
+  const raw = repo?.sectionFiles;
+  if (!raw || typeof raw !== "object") return {};
+  const out = {};
+  for (const k of SECTION_KEYS) {
+    const v = raw[k];
+    if (v == null || v === "") continue;
+    if (typeof v !== "string") throw new Error(`sectionFiles.${k} must be a string path`);
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Resolves `sectionFiles` paths to absolute paths; rejects two section keys pointing at the same file.
+ * @returns {{ keyToAbs: Record<string, string>, absPaths: string[] }}
+ */
+export function resolveSectionFilesToAbsolute(repoRoot, sectionFilesNormalized) {
+  const keyToAbs = {};
+  const pathSeen = new Map();
+  for (const k of SECTION_KEYS) {
+    const rel = sectionFilesNormalized[k];
+    if (!rel) continue;
+    const abs = path.resolve(repoRoot, rel);
+    const existingKey = pathSeen.get(abs);
+    if (existingKey && existingKey !== k) {
+      throw new Error(
+        `sectionFiles: path "${rel}" resolves to the same file for "${existingKey}" and "${k}"`,
+      );
+    }
+    pathSeen.set(abs, k);
+    keyToAbs[k] = abs;
+  }
+  return { keyToAbs, absPaths: [...new Set(Object.values(keyToAbs))].sort() };
+}
+
+/** Union of `backlogFiles` (globs/paths) and optional dedicated `sectionFiles` paths. */
+export async function resolveEffectiveBacklogFiles(repoRoot, repo) {
+  const fromGlob = await resolveBacklogFiles(repoRoot, repo?.backlogFiles ?? []);
+  const sf = normalizeSectionFilesRaw(repo);
+  const { absPaths: fromSection } = resolveSectionFilesToAbsolute(repoRoot, sf);
+  return [...new Set([...fromGlob, ...fromSection])].sort();
+}
+
 export const ISSUE_ID_RE = /<!--\s*plane:issueId=([a-zA-Z0-9_-]+)\s*-->/;
 
 export function stripPlaneMarkers(s) {
@@ -256,6 +304,22 @@ export function parseMarkdownTasks(markdown, filePath) {
   }
 
   return { lines, tasks };
+}
+
+/** When a markdown file is dedicated to one Kanban section, every task is treated as belonging to that section (no `##` heading required in the file). */
+export function getForcedSectionNameForFile(absFilePath, sectionsNormalized, keyToAbs) {
+  if (!keyToAbs || !Object.keys(keyToAbs).length) return null;
+  for (const k of SECTION_KEYS) {
+    if (keyToAbs[k] === absFilePath) return sectionsNormalized[k];
+  }
+  return null;
+}
+
+export function parseMarkdownTasksWithOptionalSectionFile(markdown, filePath, forcedSectionName) {
+  const parsed = parseMarkdownTasks(markdown, filePath);
+  if (!forcedSectionName) return parsed;
+  const tasks = parsed.tasks.map((t) => ({ ...t, headings: [forcedSectionName] }));
+  return { ...parsed, tasks };
 }
 
 export function applyTaskLineUpdate(lines, task, { title, checked, issueId }) {
@@ -404,8 +468,10 @@ export function assertRepoConfig(repoCfg) {
   if (!repoCfg) throw new Error("Repo config .plane-sync.json not found.");
   if (!repoCfg.workspaceSlug) throw new Error("Missing repo config field: workspaceSlug");
   if (!repoCfg.projectId && !repoCfg.projectSlug) throw new Error("Missing repo config field: projectId or projectSlug");
-  if (!repoCfg.backlogFiles || !Array.isArray(repoCfg.backlogFiles) || repoCfg.backlogFiles.length === 0) {
-    throw new Error("Missing repo config field: backlogFiles (non-empty array)");
+  const hasBacklogPatterns = Array.isArray(repoCfg.backlogFiles) && repoCfg.backlogFiles.some(Boolean);
+  const hasSectionFiles = Object.keys(normalizeSectionFilesRaw(repoCfg)).length > 0;
+  if (!hasBacklogPatterns && !hasSectionFiles) {
+    throw new Error("Missing repo config: set backlogFiles (non-empty) and/or sectionFiles with at least one path");
   }
 }
 
@@ -427,6 +493,26 @@ export function normalizeSections(repo) {
   return { inbox: s.inbox ?? d.inbox, ready: s.ready ?? d.ready, doing: s.doing ?? d.doing, done: s.done ?? d.done };
 }
 
+export function sectionKeyFromDisplayName(sectionsNormalized, displayName) {
+  for (const k of SECTION_KEYS) {
+    if (sectionsNormalized[k] === displayName) return k;
+  }
+  return null;
+}
+
+/** If `sectionFiles.<key>` is set for this section title, returns that file; otherwise null (keep task in the same file). */
+export function targetFileForSection(sectionsNormalized, keyToAbs, toSectionDisplayName) {
+  const key = sectionKeyFromDisplayName(sectionsNormalized, toSectionDisplayName);
+  if (!key) return null;
+  return keyToAbs?.[key] ?? null;
+}
+
+export function defaultBacklogFileForNewTask(backlogFiles, keyToAbs, sectionsNormalized, toSectionDisplayName) {
+  const p = targetFileForSection(sectionsNormalized, keyToAbs, toSectionDisplayName);
+  if (p) return p;
+  return backlogFiles[0] ?? null;
+}
+
 export function sectionToPlaneStateId(repo, sectionName) {
   const map = repo?.mapping?.sectionToStateId ?? repo?.mapping?.sectionToState ?? null;
   if (!map || typeof map !== "object") return null;
@@ -441,7 +527,11 @@ export function summarizePlan(actions, { cwd } = {}) {
     else if (a.type === "plane:create") lines.push(`Plane: create issue for "${a.title}" in ${a.workspaceSlug} (projectId=${a.projectId})`);
     else if (a.type === "plane:update") lines.push(`Plane: update issue ${a.issueId} (${a.fields.join(", ")})`);
     else if (a.type === "conflict") lines.push(`CONFLICT issue ${a.issueId}: ${a.reason}`);
-    else if (a.type === "md:move") lines.push(`MD ${path.relative(base, a.filePath)}: move "${a.title}" -> ${a.toSection}`);
+    else if (a.type === "md:move") {
+      let s = `MD ${path.relative(base, a.filePath)}: move "${a.title}" -> ${a.toSection}`;
+      if (a.toFilePath) s += ` (→ ${path.relative(base, a.toFilePath)})`;
+      lines.push(s);
+    }
     else if (a.type === "md:append") lines.push(`MD ${path.relative(base, a.filePath)}: append "${a.title}" to ${a.toSection}`);
     else if (a.type === "md:details") lines.push(`MD ${path.relative(base, a.filePath)}: update details for issue ${a.issueId}`);
     else if (a.type === "plane:comment") lines.push(`Plane: comment on issue ${a.issueId}`);
@@ -492,6 +582,20 @@ export function appendTaskLineToSection(lines, toHeadingText, taskLine) {
   let insertAt = range.end;
   while (insertAt > range.bodyStart && lines[insertAt - 1].trim() === "") insertAt--;
   lines.splice(insertAt, 0, taskLine);
+}
+
+/** Ensures `## headingText` exists so `appendTaskLineToSection` can target it (for dedicated section files without a heading). */
+export function ensureSectionHeading(lines, headingText) {
+  if (findHeadingLineIndex(lines, headingText) !== null) return;
+  lines.unshift(`## ${headingText}`, "");
+}
+
+/** Remove task line from one file and append it under `toHeadingText` in another. */
+export function moveTaskLineCrossFiles(fromLines, fromLineIndex, toLines, toHeadingText) {
+  const line = fromLines[fromLineIndex];
+  fromLines.splice(fromLineIndex, 1);
+  ensureSectionHeading(toLines, toHeadingText);
+  appendTaskLineToSection(toLines, toHeadingText, line);
 }
 
 export function findTaskMatches(tasks, query) {

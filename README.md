@@ -124,9 +124,36 @@ Edit `workspaceSlug`, **`projectId`** (recommended) or **`projectSlug`**, `backl
 
 **Optional — Kanban / status sync:** if **`mapping.sectionToStateId`** is empty or wrong, markdown sections and Plane columns may diverge. For full Kanban ↔ Plane alignment, fill the map using **state ids** from your workspace’s workflow in Plane (API or UI), keyed by the **exact** section heading strings you use in markdown.
 
+### Optional: `sectionFiles` (dedicated markdown file per section)
+
+By default, every backlog file uses **`##` headings** inside the file for **Inbox / Ready / Doing / Done** (or your renamed titles from `sections`).
+
+You can optionally add **`sectionFiles`**: an object with the same keys as **`sections`** (`inbox`, `ready`, `doing`, `done`) whose values are **repo-relative paths** to markdown files that contain **only** tasks for that Kanban column.
+
+- **Hybrid:** keep `backlogFiles` for the main file(s) with headings, and set e.g. **`sectionFiles.done`** to `docs/todo/backlog-done.md`. Sync and MCP tools merge **all** paths from `backlogFiles` **and** `sectionFiles` (deduplicated). Moving a task to **Done** can **move the line into the Done file** automatically.
+- **Whole split:** point each of `inbox` / `ready` / `doing` / `done` at its own file; you can set **`backlogFiles`** to `[]` if every path is listed in **`sectionFiles`** (at least one path required in total).
+- Tasks in a dedicated file are treated as belonging to that section **without** requiring a `##` heading in the file; if a heading is missing, tools add a `## …` line matching your `sections` title when appending or moving into that file.
+- **Constraint:** two different `sectionFiles` keys must not resolve to the **same** file path.
+
 ### State file
 
 The sync writes **`.plane-sync.state.json`** in the repo for conflict detection. Add it to **`.gitignore`** in your application repository.
+
+### Multiple `backlogFiles` and Done archive (current limitation)
+
+`backlogFiles` in `.plane-sync.json` may list **more than one** markdown path, and **`plane_sync` / `plane_sync_status`** will read them all.
+
+Without **`sectionFiles`**, **section moves are single-file only**: **`moveTaskLineBetweenSections`** does not move a line to another file. Putting a second path only in **`backlogFiles`** still risks **duplicate Plane issues** if the same task appears in two files.
+
+With **`sectionFiles`** (see above), **`plane_issue_take`**, **`plane_issue_set_status`**, and the CLI **`take` / `set-status`** move tasks **into the file** configured for the target section (e.g. **Done** → archive file). Remaining gaps (multi-line task blocks, roles for arbitrary extra files in **`backlogFiles`**) are still covered by the planned work below.
+
+**Planned work (product / tooling):**
+
+- Explicit **roles** per path in config (e.g. “active” = Inbox / Ready / Doing vs “archive” = Done-only), or an equivalent unambiguous model for sync.
+- On transition to **Done**, either **move** the task block into the archive file or provide a single documented command (e.g. close → archive).
+- **`plane_sync` / `plane_sync_status`** must merge all configured files **without duplicate issues** for the same `issueId` and without creating a second Plane issue for titles already archived.
+
+**Consumer example:** in the **excursions_broker** monorepo, the tracking item lives in **`docs/todo/backlog.md`** (Inbox) under **Dev tooling: plane-sync — несколько файлов беклога и перенос в архив Done**. The embedded CLI copy is under **`scripts/plane-sync/`**; this MCP package is the shared implementation surface for Cursor.
 
 ### Integrator notes (package / MCP consumers)
 
